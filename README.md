@@ -1,11 +1,12 @@
 # BCIA-PEFT
 
-独立的最小 RGB–DSM 语义分割项目：冻结 DINOv3 ViT-L/16，在第 18 个 Block 后插入一次 rank-64 BCIA，输出 Potsdam 六类 logits。复用 MsRE 的 DINO 接口和 MMSegmentation Segmenter Head；不含历史网络、训练 Runner、优化器或训练入口。
+RGB–DSM 语义分割与机制实验。冻结 DINOv3 ViT-L/16，在第 18 个 Block 后插入 rank-64 适配器，复用 MMSegmentation Segmenter Head，输出 Potsdam 六类 logits。
 
 - [架构与项目结构](architecture.md)
 - [源码来源、版本及许可证](SOURCES.md)
 - [验收结果与显存记录](TEST_REPORT.md)
 - [权重审计与转换映射](WEIGHT_AUDIT.md)
+- [G0–G4 数据、监督与恢复协议](EXPERIMENT_PROTOCOL.md)
 
 ## 本机运行
 
@@ -18,6 +19,16 @@ python -m tests.smoke --device cuda
 ~~~
 
 无 GPU 时可用 --device cpu。smoke 显式使用随机权重，不执行优化器更新。模型 API：BCIAPeft(checkpoint=...) 接收严格匹配 MsRE 接口的 backbone state dict；round-trip 及 smoke 可显式使用 BCIAPeft(random_init=True)。两种模式互斥，不会静默回退。RGB/DSM 必须已归一化；forward 返回 [B,6,32,32]，logits_for_tile 上采样到原切片大小。
+
+## G0–G4 入口
+
+在本机设置 BCIA_DATA_ROOT 和 BCIA_BACKBONE_CHECKPOINT，分别指向已审计切片目录和 BCIA 布局的 DINO 权重。以 configs/mechanisms.json 为模板创建受忽略的 configs/mechanisms.local.json。明确填写 group、steps、validate_every、save_every。G3/G4 需要显式填写两个正 MSE 系数。
+
+~~~powershell
+python -m bcia_peft.train --config configs/mechanisms.local.json --work-dir work_dirs/G2 --device cuda --describe
+~~~
+
+上面的命令只输出数据指纹、初始权重哈希和优化器参数组。正式实验使用明确的预算，移除 --describe 即开始运行。追加 --resume 从同一目录的 last.pth 恢复，配置、设备和输入指纹必须匹配。详见 [实验协议](EXPERIMENT_PROTOCOL.md)。
 
 ## 权重转换、验收和验证接口
 

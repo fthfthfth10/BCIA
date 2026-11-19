@@ -55,7 +55,9 @@ class BCIA(nn.Module):
         nn.init.zeros_(self.output_projection.weight)
         nn.init.zeros_(self.output_projection.bias)
 
-    def forward(self, spatial, z_dsm, coverage):
+    def forward(self, spatial, z_dsm, coverage, *, suppress=()):
+        if set(suppress) - {"rgb", "dsm"}:
+            raise ValueError("suppress accepts rgb and dsm")
         batch = spatial.shape[0]
         z_rgb = self.rgb_projection(spatial).transpose(1, 2).reshape(batch, 64, 32, 32)
         supported = coverage > 0
@@ -68,18 +70,50 @@ class BCIA(nn.Module):
         w_rgb, w_dsm = routed.sigmoid().split(1, dim=1)
         w_dsm = torch.where(supported, w_dsm, 0.0)
         dsm_contribution = torch.where(supported, w_dsm * u_dsm, 0.0)
-        mixed = self.mix(torch.cat((w_rgb * u_rgb, dsm_contribution), dim=1))
+        rgb_contribution = w_rgb * u_rgb
+        if "rgb" in suppress:
+            rgb_contribution = torch.zeros_like(rgb_contribution)
+        if "dsm" in suppress:
+            dsm_contribution = torch.zeros_like(dsm_contribution)
+        mixed = self.mix(torch.cat((rgb_contribution, dsm_contribution), dim=1))
         residual = self.output_projection(mixed.flatten(2).transpose(1, 2))
         return BCIAOutput(residual, coverage, z_rgb, z_dsm, pred_dsm, pred_rgb,
                           u_rgb, u_dsm, w_rgb, w_dsm, dsm_contribution, mixed)
 
 
-def prediction_losses(output):
+class LowRankFusion(nn.Module):
+    """Capacity-matched concatenation baseline with unimodal spatial mixing."""
+
+    def __init__(self):
+        super().__init__()
+        self.rgb_projection = nn.Linear(1024, 64)
+        self.rgb_conv = nn.Conv2d(64, 64, 3, padding=1)
+        self.dsm_conv = nn.Conv2d(64, 64, 3, padding=1)
+        self.mix = nn.Conv2d(128, 64, 1)
+        self.output_projection = nn.Linear(64, 1024)
+        nn.init.zeros_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
+
+    def forward(self, spatial, z_dsm, coverage):
+        rgb = self.rgb_projection(spatial).transpose(1, 2).reshape(-1, 64, 32, 32)
+        supported = coverage > 0
+        dsm = self.dsm_conv(torch.where(supported, z_dsm, 0.0))
+        mixed = self.mix(torch.cat((F.gelu(self.rgb_conv(rgb)),
+                                    torch.where(supported, F.gelu(dsm), 0.0)), dim=1))
+        return self.output_projection(mixed.flatten(2).transpose(1, 2))
+
+
+def prediction_losses(output, *, predictors_only=None):
     """Separate coverage-weighted MSEs; no segmentation loss coupling."""
     weight = output.coverage
     denom = (weight.sum() * 64).clamp_min(1.0)
-    dsm_error = (output.pred_dsm - output.z_dsm.detach()).square()
-    rgb_error = (output.pred_rgb - output.z_rgb.detach()).square()
+    pred_dsm, pred_rgb = output.pred_dsm, output.pred_rgb
+    if predictors_only is not None:
+        pred_dsm = predictors_only.g_rgb_to_dsm(output.z_rgb.detach())
+        pred_rgb = predictors_only.g_dsm_to_rgb(output.z_dsm.detach())
+        pred_rgb = torch.where(weight > 0, pred_rgb, 0.0)
+    dsm_error = (pred_dsm - output.z_dsm.detach()).square()
+    rgb_error = (pred_rgb - output.z_rgb.detach()).square()
     return {
         "rgb_to_dsm": (dsm_error * weight).sum() / denom,
         "dsm_to_rgb": (rgb_error * weight).sum() / denom,

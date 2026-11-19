@@ -45,3 +45,16 @@ credentials.json
 .secrets/
 secrets/
 *.bundle
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.gif
+*.svg
+*.ico
+*.avif
+*.heic
+.conda/
+venv/
+wandb/

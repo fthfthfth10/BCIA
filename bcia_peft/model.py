@@ -3,7 +3,7 @@ from mmseg.models.decode_heads import SegmenterMaskTransformerHead
 from torch import nn
 
 from ._dinov3 import DINOv3ViT
-from .adapter import BCIA, LightweightDSMEncoder
+from .adapter import BCIA, LightweightDSMEncoder, LowRankFusion
 from .checkpoints import load_backbone_checkpoint
 
 
@@ -12,6 +12,7 @@ PREFIX_TOKENS = 5
 TILE_SIZE = 512
 NUM_CLASSES = 6
 IGNORE_INDEX = 255
+GROUPS = ("G0", "G1", "G2", "G3", "G4")
 
 
 def make_backbone():
@@ -28,10 +29,13 @@ def insert_residual(tokens, residual):
 
 
 class BCIAPeft(nn.Module):
-    def __init__(self, checkpoint=None, *, random_init=False):
+    def __init__(self, checkpoint=None, *, random_init=False, group="G2"):
         super().__init__()
         if (checkpoint is not None) == random_init:
             raise ValueError("Provide one checkpoint or explicitly set random_init=True for smoke tests")
+        if group not in GROUPS:
+            raise ValueError(f"Unknown experiment group: {group}")
+        self.group = group
         self.backbone = make_backbone()
         if random_init:
             nn.init.normal_(self.backbone.embeddings.register_tokens, std=0.02)
@@ -45,10 +49,20 @@ class BCIAPeft(nn.Module):
             ignore_index=IGNORE_INDEX, align_corners=False,
         )
         self.decode_head.init_weights()
+        if group == "G1":
+            baseline = LowRankFusion()
+            baseline.rgb_projection.load_state_dict(self.bcia.rgb_projection.state_dict())
+            self.bcia = baseline
+        elif group == "G0":
+            self.bcia.requires_grad_(False)
+            self.dsm_encoder.requires_grad_(False)
 
     def train(self, mode=True):
         super().train(mode)
         self.backbone.eval()
+        if self.group == "G0":
+            self.bcia.eval()
+            self.dsm_encoder.eval()
         return self
 
     def _check_inputs(self, rgb, dsm, valid):
@@ -65,9 +79,11 @@ class BCIAPeft(nn.Module):
         if weight.dtype != torch.float32:
             raise TypeError("This implementation expects an FP32 model")
 
-    def extract_features(self, rgb, dsm, valid, *, bypass=False):
+    def extract_features(self, rgb, dsm, valid, *, bypass=False, suppress=()):
         self._check_inputs(rgb, dsm, valid)
-        if bypass:
+        if suppress and (bypass or self.group in ("G0", "G1")):
+            raise ValueError("Innovation suppression requires an active BCIA adapter")
+        if bypass or self.group == "G0":
             return self.backbone(rgb), None
 
         tokens = self.backbone.embeddings(rgb)
@@ -76,14 +92,20 @@ class BCIAPeft(nn.Module):
             tokens = block(tokens, position_embeddings=rope)
             if index == INSERT_AFTER:
                 z_dsm, coverage = self.dsm_encoder(dsm, valid)
-                output = self.bcia(tokens[:, PREFIX_TOKENS:], z_dsm, coverage)
-                tokens = insert_residual(tokens, output.residual)
+                spatial = tokens[:, PREFIX_TOKENS:]
+                if self.group == "G1":
+                    residual = self.bcia(spatial, z_dsm, coverage)
+                    output = None
+                else:
+                    output = self.bcia(spatial, z_dsm, coverage, suppress=suppress)
+                    residual = output.residual
+                tokens = insert_residual(tokens, residual)
         spatial = self.backbone.norm(tokens)[:, PREFIX_TOKENS:]
         feature = spatial.reshape(rgb.shape[0], 32, 32, 1024).permute(0, 3, 1, 2).contiguous()
         return (feature,), output
 
-    def forward(self, rgb, dsm, valid, *, bypass=False, return_adapter=False):
-        features, output = self.extract_features(rgb, dsm, valid, bypass=bypass)
+    def forward(self, rgb, dsm, valid, *, bypass=False, return_adapter=False, suppress=()):
+        features, output = self.extract_features(rgb, dsm, valid, bypass=bypass, suppress=suppress)
         logits = self.decode_head(features)
         return (logits, output) if return_adapter else logits
 

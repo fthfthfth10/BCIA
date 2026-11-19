@@ -1,0 +1,16 @@
+{
+  "group": "G2",
+  "seed": 0,
+  "batch_size": 1,
+  "workers": 0,
+  "steps": null,
+  "validate_every": null,
+  "save_every": null,
+  "lr": 0.0001,
+  "weight_decay": 0.05,
+  "warmup_steps": 0,
+  "warmup_start_ratio": 0.1,
+  "power": 1.0,
+  "min_lr_ratio": 0.0,
+  "mse": {"rgb_to_dsm": 0.0, "dsm_to_rgb": 0.0}
+}
