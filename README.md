@@ -30,6 +30,8 @@ python -m bcia_peft.train --config configs/mechanisms.local.json --work-dir work
 
 上面的命令只输出数据指纹、初始权重哈希和优化器参数组。正式实验使用明确的预算，移除 --describe 即开始运行。追加 --resume 从同一目录的 last.pth 恢复，配置、设备和输入指纹必须匹配。详见 [实验协议](EXPERIMENT_PROTOCOL.md)。
 
+G2 诊断可使用 configs/g2_pilot.json，指定独立目录和 --pilot-steps 64。该上限保留原长程调度。正式验证以 mIoU5 选择 Best。固定批次的损失与辅助梯度诊断可用 python -m tests.g2_diagnostics 复现。
+
 ## 权重转换、验收和验证接口
 
 ~~~powershell

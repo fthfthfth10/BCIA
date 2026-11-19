@@ -12,7 +12,8 @@ from torch import nn
 from bcia_peft.adapter import prediction_losses
 from bcia_peft.data import SynchronizedGeometry
 from bcia_peft.model import BCIAPeft
-from bcia_peft.train import StepBatchSampler, build_optimizer, check_config, load_state, save_state
+from bcia_peft.train import (StepBatchSampler, best_record, build_optimizer, check_config,
+                             check_pilot_gradients, load_state, prune_previous_best, save_state)
 
 
 class TinyBackbone(nn.Module):
@@ -176,6 +177,71 @@ class MechanismsTest(unittest.TestCase):
         config = json.loads(config_path.read_text(encoding="utf-8"))
         with self.assertRaisesRegex(ValueError, "steps"):
             check_config(config)
+
+    def test_pilot_config_and_formal_best(self):
+        path = Path(__file__).resolve().parents[1] / "configs" / "g2_pilot.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+        check_config(config, pilot=True)
+        with self.assertRaisesRegex(ValueError, "validate_every"):
+            check_config(config)
+        first = best_record(dict(mIoU5=70, mIoU6=60), None, 1)
+        self.assertIs(best_record(dict(mIoU5=69, mIoU6=61), first, 2), first)
+        second = best_record(dict(mIoU5=71, mIoU6=59), first, 3)
+        self.assertEqual((second["metric"], second["step"], second["score"]), ("mIoU5", 3, 71))
+        self.assertIs(best_record(dict(mIoU5=71, mIoU6=80), second, 4), second)
+        self.assertIs(best_record(dict(mIoU5=None, mIoU6=90), second, 5), second)
+
+    def test_pilot_cap_preserves_long_schedule(self):
+        path = Path(__file__).resolve().parents[1] / "configs" / "g2_pilot.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+        model = nn.Sequential(nn.Linear(1, 1))
+        optimizer, scheduler = build_optimizer(model, config)
+        for _ in StepBatchSampler(3456, 1, 42, 0, 64):
+            optimizer.step()
+            scheduler.step()
+        self.assertEqual(scheduler.last_epoch, 64)
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1e-4 * (0.1 + 0.9 * 64 / 1500))
+
+    def test_best_cleanup_after_checkpoint_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            previous = best_record({"mIoU5": 1}, None, 4)
+            current = best_record({"mIoU5": 2}, previous, 8)
+            old, new, last = (work / filename for filename in
+                              (previous["file"], current["file"], "last.pth"))
+            old.touch()
+            prune_previous_best(work, previous, current)
+            self.assertTrue(old.exists())
+            new.touch()
+            prune_previous_best(work, previous, current)
+            self.assertTrue(old.exists())
+            last.touch()
+            prune_previous_best(work, previous, current)
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists() and last.exists())
+
+    def test_pilot_gradient_guards(self):
+        model = nn.Module()
+        model.backbone = nn.Linear(1, 1).requires_grad_(False)
+        model.decode_head = nn.Linear(1, 1)
+        model.dsm_encoder = nn.Linear(1, 1)
+        model.bcia = nn.ModuleDict(dict(mix=nn.Linear(1, 1), output_projection=nn.Linear(1, 1)))
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.grad = torch.full_like(param, float("mix" not in name))
+        self.assertEqual(check_pilot_gradients(model, 1)["bcia.mix"], 0)
+        with self.assertRaisesRegex(RuntimeError, "upstream"):
+            check_pilot_gradients(model, 4)
+        model.bcia["mix"].weight.grad.fill_(float("nan"))
+        with self.assertRaisesRegex(FloatingPointError, "bcia.mix"):
+            check_pilot_gradients(model, 2)
+        model.backbone.weight.grad = torch.ones_like(model.backbone.weight)
+        with self.assertRaisesRegex(RuntimeError, "Frozen DINO"):
+            check_pilot_gradients(model, 2)
+
+    def test_budget_auxiliary_coefficients(self):
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "mechanisms.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
         config.update(steps=3, validate_every=2, save_every=2)
         check_config(config)
         config["group"] = "G3"

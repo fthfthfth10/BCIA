@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from .validation import validate
 
 
 DIRECTIONS = ("rgb_to_dsm", "dsm_to_rgb")
+BEST_METRIC = "mIoU5"
 
 
 class StepBatchSampler:
@@ -48,9 +50,9 @@ class StepBatchSampler:
         return self.stop - self.start
 
 
-def training_loader(dataset, config, start):
+def training_loader(dataset, config, start, stop=None):
     sampler = StepBatchSampler(len(dataset), config["batch_size"], config["seed"],
-                               start, config["steps"])
+                               start, config["steps"] if stop is None else stop)
     return DataLoader(dataset, batch_sampler=sampler, num_workers=config["workers"],
                       generator=torch.Generator().manual_seed(config["seed"]))
 
@@ -73,10 +75,11 @@ def data_protocol(train, val):
                 sha256={name: file_sha256(train.root / name) for name in files})
 
 
-def check_config(config):
+def check_config(config, *, pilot=False):
     if config["group"] not in GROUPS:
         raise ValueError("Expected G0 through G4")
-    for key in ("steps", "batch_size", "validate_every", "save_every"):
+    required = ("steps", "batch_size", "save_every")
+    for key in required if pilot else (*required, "validate_every"):
         if type(config[key]) is not int or config[key] < 1:
             raise ValueError(f"Set {key} explicitly to a positive integer")
     for key in ("seed", "workers", "warmup_steps"):
@@ -176,7 +179,7 @@ def save_state(path, model, optimizer, scheduler, identity, step, best, device):
 def load_state(path, model, optimizer, scheduler, identity):
     state = torch.load(str(path), map_location="cpu", weights_only=True)
     if state["identity"] != identity:
-        raise ValueError("Resume requires the same configuration, initial weights and data protocol")
+        raise ValueError("Resume requires the same run mode, configuration, initial weights and data protocol")
     model.load_state_dict(state["model"], strict=True)
     optimizer.load_state_dict(state["optimizer"])
     scheduler.load_state_dict(state["scheduler"])
@@ -197,19 +200,65 @@ def initial_hashes(model):
     return hashes
 
 
-def train_step(model, batch, optimizer, scheduler, weights, device):
+def best_record(metrics, previous, step):
+    score = metrics[BEST_METRIC]
+    if score is None or not math.isfinite(score) or (previous is not None and score <= previous["score"]):
+        return previous
+    return dict(metric=BEST_METRIC, step=step, score=score, file=f"best-{step:08d}.pth")
+
+
+def prune_previous_best(work, previous, current):
+    if previous is None or current is None or previous["step"] >= current["step"]:
+        return
+    old_path = work / f"best-{previous['step']:08d}.pth"
+    new_path = work / f"best-{current['step']:08d}.pth"
+    if new_path.is_file() and (work / "last.pth").is_file():
+        old_path.unlink(missing_ok=True)
+
+
+def check_pilot_gradients(model, step):
+    if any(param.grad is not None for param in model.backbone.parameters()):
+        raise RuntimeError("Frozen DINO backbone received a gradient")
+    modules = {"dsm_encoder": model.dsm_encoder, "decode_head": model.decode_head}
+    modules.update({f"bcia.{name}": module for name, module in model.bcia.named_children()})
+    norms = {}
+    for name, module in modules.items():
+        gradients = [param.grad for param in module.parameters() if param.requires_grad]
+        if not gradients or any(grad is None for grad in gradients):
+            raise RuntimeError(f"Missing gradient in {name}")
+        norms[name] = torch.linalg.vector_norm(torch.stack(
+            [torch.linalg.vector_norm(grad) for grad in gradients])).item()
+        if not math.isfinite(norms[name]):
+            raise FloatingPointError(f"Nonfinite gradient norm in {name}")
+    if norms["bcia.output_projection"] == 0:
+        raise RuntimeError("BCIA output projection has zero gradient")
+    if step >= 4 and not any(
+            norm > 0 for name, norm in norms.items()
+            if name.startswith("bcia.") and name != "bcia.output_projection"):
+        raise RuntimeError("BCIA upstream gradient is zero after the initialization window")
+    return norms
+
+
+def segmentation_loss(model, logits, labels, device):
+    labels = labels.to(device)
+    logits = logits.to(device)
+    if logits.shape[-2:] != labels.shape[-2:]:
+        logits = F.interpolate(logits, size=labels.shape[-2:], mode="bilinear",
+                               align_corners=model.decode_head.align_corners)
+    samples = [SegDataSample(gt_sem_seg=PixelData(data=label.unsqueeze(0))) for label in labels]
+    return model.decode_head.loss_by_feat(logits, samples)["loss_ce"]
+
+
+def train_step(model, batch, optimizer, scheduler, weights, device, *, pilot_step=None):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     inputs = [batch[key].to(device) for key in ("rgb", "dsm", "valid")]
     logits, output = model(*inputs, return_adapter=True)
-    labels = batch["label"].cpu()
-    logits = logits.cpu()
-    if logits.shape[-2:] != labels.shape[-2:]:
-        logits = F.interpolate(logits, size=labels.shape[-2:], mode="bilinear",
-                               align_corners=model.decode_head.align_corners)
-    samples = [SegDataSample(gt_sem_seg=PixelData(data=label.unsqueeze(0)))
-               for label in labels]
-    segmentation = model.decode_head.loss_by_feat(logits, samples)["loss_ce"].to(device)
+    if pilot_step is not None and (
+            not torch.isfinite(logits).all().item() or
+            not all(torch.isfinite(tensor).all().item() for tensor in output)):
+        raise FloatingPointError("Nonfinite logits or BCIA activation")
+    segmentation = segmentation_loss(model, logits, batch["label"], "cpu").to(device)
     auxiliary = {}
     total = segmentation
     if model.group in ("G3", "G4"):
@@ -218,12 +267,19 @@ def train_step(model, batch, optimizer, scheduler, weights, device):
     if not torch.isfinite(total).item():
         raise FloatingPointError("Nonfinite training loss")
     total.backward()
+    norms = check_pilot_gradients(model, pilot_step) if pilot_step is not None else None
     learning_rates = {group["name"]: group["lr"] for group in optimizer.param_groups}
     optimizer.step()
+    if pilot_step is not None:
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                if not torch.isfinite(param).all().item():
+                    raise FloatingPointError(f"Nonfinite parameter in {group['name']} after update")
     scheduler.step()
     return dict(loss=total.item(), segmentation=segmentation.item(),
                 mse={key: loss.item() for key, loss in auxiliary.items()},
-                lr=learning_rates, samples=list(batch["id"]))
+                lr=learning_rates, samples=list(batch["id"]),
+                **({"grad_norms": norms} if norms is not None else {}))
 
 
 def main():
@@ -232,10 +288,15 @@ def main():
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--device", choices=("cpu", "cuda"), required=True)
     parser.add_argument("--resume", action="store_true", help="Resume last.pth from work-dir")
+    parser.add_argument("--pilot-steps", type=int, help="Limit G2 execution without changing the schedule")
     parser.add_argument("--describe", action="store_true", help="Print run identity without training or writing")
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    check_config(config)
+    pilot = args.pilot_steps is not None
+    check_config(config, pilot=pilot)
+    stop = args.pilot_steps if pilot else config["steps"]
+    if pilot and (config["group"] != "G2" or not 1 <= stop <= min(64, config["steps"])):
+        parser.error("--pilot-steps requires G2 and a positive limit of at most 64 within the configured budget")
     device = torch.device(args.device)
     initialize_rng(config["seed"], device)
     root = Path(os.environ["BCIA_DATA_ROOT"])
@@ -247,7 +308,9 @@ def main():
     hashes = initial_hashes(model)
     model.to(device)
     optimizer, scheduler = build_optimizer(model, config)
-    identity = dict(config=config, device=args.device, torch=str(torch.__version__),
+    identity = dict(config=config, mode="pilot" if pilot else "formal",
+                    pilot_steps=args.pilot_steps, best_metric=None if pilot else BEST_METRIC,
+                    device=args.device, torch=str(torch.__version__),
                     device_name=torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
                     data_protocol=protocol, backbone_sha256=backbone_hash,
                     initial_sha256=hashes, parameters=model.parameter_counts(),
@@ -267,22 +330,39 @@ def main():
         write_log(work / "run.json", identity)
     log_dir = work / "steps"
     log_dir.mkdir(exist_ok=True)
-    for step, batch in enumerate(training_loader(train, config, start), start + 1):
-        values = train_step(model, batch, optimizer, scheduler, config["mse"], device)
-        validation_due = step % config["validate_every"] == 0 or step == config["steps"]
-        improved = False
+    if not 0 <= start <= stop:
+        raise ValueError("Checkpoint step outside the execution budget")
+    if args.resume:
+        print(json.dumps(dict(restored_step=start, scheduler_step=scheduler.last_epoch)), flush=True)
+    for step, batch in enumerate(training_loader(train, config, start, stop), start + 1):
+        cuda_pilot = pilot and device.type == "cuda"
+        if cuda_pilot:
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        began = time.perf_counter()
+        values = train_step(model, batch, optimizer, scheduler, config["mse"], device,
+                            pilot_step=step if pilot else None)
+        if cuda_pilot:
+            torch.cuda.synchronize(device)
+        if pilot:
+            values["train_seconds"] = time.perf_counter() - began
+            if cuda_pilot:
+                values["gpu_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(device)
+                values["gpu_peak_reserved_bytes"] = torch.cuda.max_memory_reserved(device)
+        validation_due = not pilot and (
+            step % config["validate_every"] == 0 or step == config["steps"])
+        previous = best
         if validation_due:
             values["validation"] = validate(model, val, device)
-            score = values["validation"]["mIoU5"]
-            if score is not None and (best is None or score > best["score"]):
-                best = dict(step=step, score=score, file=f"best-{step:08d}.pth")
-                improved = True
+            best = best_record(values["validation"], previous, step)
         values["step"] = step
         write_log(log_dir / f"{step:08d}.json", values)
-        if improved:
+        if best is not previous:
             save_state(work / best["file"], model, optimizer, scheduler, identity, step, best, device)
-        if validation_due or step % config["save_every"] == 0:
+        if validation_due or step % config["save_every"] == 0 or step == stop:
             save_state(last, model, optimizer, scheduler, identity, step, best, device)
+            if best is not previous:
+                prune_previous_best(work, previous, best)
         print(json.dumps(values, allow_nan=False), flush=True)
 
 

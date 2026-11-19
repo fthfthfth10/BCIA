@@ -22,4 +22,8 @@
 - 每个 epoch 独立生成固定 permutation。每个采样位置携带确定的 NumPy 增强种子。尾部不足一个 batch 的样本本 epoch 丢弃。恢复直接从已完成的 step 定位同一批索引和增强种子。
 - 使用单进程训练、同设备与同软件栈。启用 PyTorch 确定性算法并关闭 TF32 和 cuDNN benchmark。分割 logits 上采样及 MMSeg 损失在 CPU 计算以保留确定性反传，梯度传回模型所在设备。
 - run.json 和 --describe 报告各组的参数量、初始 tensor SHA-256、backbone 文件哈希、设备、配置、场景和清单/归一化文件哈希。每步 JSON 记录样本 ID、实际学习率、分割和辅助损失。验证时追加六类指标。
-- last.pth 原子替换，包含模型、AdamW、调度器、已完成步数、最佳记录、Python/NumPy/Torch/CUDA RNG 和运行身份。最佳 checkpoint 为 best-步数.pth，last.pth 的 best 字段指向当前最佳，mIoU5 并列时保留首次。恢复以 last.pth 为准，其后已写出的步骤日志可被重跑覆盖。始终为每组使用独立 work-dir。
+- last.pth 原子替换，包含模型、AdamW、调度器、已完成步数、最佳记录、Python/NumPy/Torch/CUDA RNG 和运行身份。仍按完整验证集 mIoU5 选择 Best，继续报告 mIoU6、OA 和六类 IoU。并列保留首次。发布顺序为新 best-步数.pth、指向它的 last.pth、删除上一个 Best。中断可能留下额外快照，清理时应先读取 last.pth 的 best 字段并保留所指文件。正常保留 Last 和当前 Best，发布期间为两个 Best、Last 和临时文件预留空间。恢复以 last.pth 为准，其后的步骤日志可被重跑覆盖。
+
+## G2 Pilot
+
+使用 configs/g2_pilot.json 和独立 work-dir，传入 --pilot-steps 64。上限计入恢复前已完成的步骤，调度仍由 steps=40000 和 warmup_steps=1500 计算。Pilot 记录每次优化的样本、分割损失、学习率、各模块梯度范数、同步设备后的耗时和显存峰值。耗时覆盖训练计算及诊断检查，排除数据加载、日志和 checkpoint 写入。Pilot 跳过验证与 Best 选择。运行身份绑定模式和执行上限，恢复使用相同模式、配置及目录。已有缺少模式字段的 checkpoint 会被身份校验拒绝。
