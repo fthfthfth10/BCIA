@@ -31,3 +31,8 @@ v1 保留为历史 Pilot。正式实验候选为独立的 potsdam_rgb_dsm_v2，�
 ## G2 Pilot
 
 使用 configs/g2_pilot.json 和独立 work-dir，传入 --pilot-steps 64。上限计入恢复前已完成的步骤，调度仍由 steps=40000 和 warmup_steps=1500 计算。Pilot 记录每次优化的样本、分割损失、学习率、各模块梯度范数、同步设备后的耗时和显存峰值。耗时覆盖训练计算及诊断检查，排除数据加载、日志和 checkpoint 写入。Pilot 跳过验证与 Best 选择。运行身份绑定模式和执行上限，恢复使用相同模式、配置及目录。已有缺少模式字段的 checkpoint 会被身份校验拒绝。
+## V3 正式 G0–G2
+
+正式数据使用 potsdam_rgb_dsm_v3。v3 沿用 v2 的 4_12 修复，并按原 xyxy 精确替换 6_7 的 144 张训练标签。三组运行使用相同的 v3 训练和验证清单及同一 DINO 权重。有效像素 CE、seed 42、batch 1、FP32、AdamW lr=1e-4、weight decay 0.05、40,000 steps、warmup 1,500 步且起始比例 0.1、PolyLR power 1、每 2,000 步验证与保存、mIoU5 选 Best、无 TTA、辅助 MSE 系数为零。
+
+configs/formal_g0.json、configs/formal_g1.json、configs/formal_g2.json 仅组别不同。使用 python -m run_formal --commit <训练提交> --work-dir <本地忽略目录> 在同一 GPU 顺序运行。序列入口先核查数据指纹、统一 Head 初始化和独立输出目录，保存实际提交与三组身份。任一执行或验收失败将停止序列。已有任务的恢复使用对应组的原配置及其输出目录。

@@ -1,0 +1,20 @@
+{
+  "group": "G0",
+  "ce_reduction": "valid_pixels",
+  "seed": 42,
+  "batch_size": 1,
+  "workers": 0,
+  "steps": 40000,
+  "validate_every": 2000,
+  "save_every": 2000,
+  "lr": 0.0001,
+  "weight_decay": 0.05,
+  "warmup_steps": 1500,
+  "warmup_start_ratio": 0.1,
+  "power": 1,
+  "min_lr_ratio": 0,
+  "mse": {
+    "rgb_to_dsm": 0,
+    "dsm_to_rgb": 0
+  }
+}
