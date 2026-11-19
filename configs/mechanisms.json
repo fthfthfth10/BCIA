@@ -1,5 +1,6 @@
 {
   "group": "G2",
+  "ce_reduction": "valid_pixels",
   "seed": 0,
   "batch_size": 1,
   "workers": 0,

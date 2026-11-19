@@ -14,6 +14,10 @@
 
 ## 数据
 
+v1 保留为历史 Pilot。正式实验候选为独立的 potsdam_rgb_dsm_v2，复用 v1 的 RGB、DSM、valid 和其余标签，唯独从已核验的参与者 Eroded TIFF 精确制备 4_12 的 144 张标签。两个目录同级，相对路径引用只读资产。制备和复核使用 python -m potsdam_v2 build 或 verify，显式传入 --v1、--v2、--archive。完整证据见 [标签来源审计](LABEL_SOURCE_AUDIT.md)。
+
+正式候选模板显式设置 ce_reduction=valid_pixels，同一对照实验的各组应统一使用该配置。分割损失分母为非 ignore 的像素总数，全 ignore 返回零且分割梯度为零。full_pixels 保留历史的全图分母，旧配置缺省此模式。两者仍沿用同一 logits 上采样、类别映射与固定 ignore=255。
+
 使用 MsRE 已制备的固定 24/14 场景、3,456/2,016 个 512×512 Eroded/noBoundary 切片。训练数据沿用 [MsRE 同步几何](https://github.com/fthfthfth10/msre/blob/75d235a2435fe36f124780f7bf5d1be25df0ca5b/msre/datasets/potsdam_rgb_dsm.py) 的 0.5–2.0 缩放、0.75 类别占比约束裁剪、0.5 水平翻转及 RGB 光度扰动。标签最近邻插值。DSM 按有效双线性支持插值，只有全部双线性支持有效的像素保留有效标记。训练集既有 mean/std 给 DSM 做 z-score。归一化后右下补齐 512，RGB/DSM/valid/label 分别填 0/0/false/255。验证读取原切片，按完整集 mIoU5 选择最佳。
 
 ## 复现与恢复

@@ -23,6 +23,7 @@ from .validation import validate
 
 DIRECTIONS = ("rgb_to_dsm", "dsm_to_rgb")
 BEST_METRIC = "mIoU5"
+CE_REDUCTIONS = ("full_pixels", "valid_pixels")
 
 
 class StepBatchSampler:
@@ -76,6 +77,8 @@ def data_protocol(train, val):
 
 
 def check_config(config, *, pilot=False):
+    if config.get("ce_reduction", "full_pixels") not in CE_REDUCTIONS:
+        raise ValueError("ce_reduction must be full_pixels or valid_pixels")
     if config["group"] not in GROUPS:
         raise ValueError("Expected G0 through G4")
     required = ("steps", "batch_size", "save_every")
@@ -239,17 +242,24 @@ def check_pilot_gradients(model, step):
     return norms
 
 
-def segmentation_loss(model, logits, labels, device):
+def segmentation_loss(model, logits, labels, device, *, reduction="full_pixels"):
+    if reduction not in CE_REDUCTIONS:
+        raise ValueError(f"Unknown CE reduction: {reduction}")
     labels = labels.to(device)
     logits = logits.to(device)
     if logits.shape[-2:] != labels.shape[-2:]:
         logits = F.interpolate(logits, size=labels.shape[-2:], mode="bilinear",
                                align_corners=model.decode_head.align_corners)
     samples = [SegDataSample(gt_sem_seg=PixelData(data=label.unsqueeze(0))) for label in labels]
-    return model.decode_head.loss_by_feat(logits, samples)["loss_ce"]
+    full = model.decode_head.loss_by_feat(logits, samples)["loss_ce"]
+    if reduction == "valid_pixels":
+        valid_count = (labels != model.decode_head.ignore_index).sum()
+        return full * (labels.numel() / valid_count.clamp_min(1).to(full.dtype))
+    return full
 
 
-def train_step(model, batch, optimizer, scheduler, weights, device, *, pilot_step=None):
+def train_step(model, batch, optimizer, scheduler, weights, device, *, pilot_step=None,
+               ce_reduction="full_pixels"):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     inputs = [batch[key].to(device) for key in ("rgb", "dsm", "valid")]
@@ -258,7 +268,8 @@ def train_step(model, batch, optimizer, scheduler, weights, device, *, pilot_ste
             not torch.isfinite(logits).all().item() or
             not all(torch.isfinite(tensor).all().item() for tensor in output)):
         raise FloatingPointError("Nonfinite logits or BCIA activation")
-    segmentation = segmentation_loss(model, logits, batch["label"], "cpu").to(device)
+    segmentation = segmentation_loss(model, logits, batch["label"], "cpu",
+                                     reduction=ce_reduction).to(device)
     auxiliary = {}
     total = segmentation
     if model.group in ("G3", "G4"):
@@ -341,7 +352,8 @@ def main():
             torch.cuda.reset_peak_memory_stats(device)
         began = time.perf_counter()
         values = train_step(model, batch, optimizer, scheduler, config["mse"], device,
-                            pilot_step=step if pilot else None)
+                            pilot_step=step if pilot else None,
+                            ce_reduction=config.get("ce_reduction", "full_pixels"))
         if cuda_pilot:
             torch.cuda.synchronize(device)
         if pilot:
