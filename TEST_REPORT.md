@@ -2,6 +2,8 @@
 
 ## G2 真实数据 Pilot
 
+低值损失的独立复现和同 logits 归约比较见 [Pilot 标签审计](PILOT_LABEL_AUDIT.md)。64 批重放只执行推理。
+
 - 起始本地和远端均为 882fbceddd3829035b8b51d32d3916f36d4cc19f。上一个请求使用的 64 步总预算和 8 步 warmup 已产生完整 64 条本地日志，目录保持隔离。以下结果来自修正配置的独立运行。
 - Windows、Python 3.8.20、PyTorch 2.1.1+cu121、CUDA 12.1、RTX 3070 Ti、驱动 616.92、CPU 计算线程 4。FP32，关闭 TF32，确定性算法开启。使用已审计 Potsdam Eroded/noBoundary 训练切片及固定同步增强。
 - G2 完成 64/64 步，seed=42、batch=1、workers=0、AdamW lr=1e-4、wd=0.05、warmup=1500、起始 LR 比例 0.1、PolyLR power=1、总调度预算 40,000、每 16 步保存 Last。辅助 MSE 关闭。64 条日志连续且样本 ID 唯一，逐步 LR 与公式一致。首步/末步实际 LR 为 1e-5 / 1.378e-5。分割损失首步 0.91692090、末步 1.27954471、范围 0.00099059–2.26320529。
