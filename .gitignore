@@ -27,6 +27,11 @@ outputs/
 *.bin
 *.npy
 *.npz
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+*.gguf
 *.tif
 *.tiff
 *.zip
@@ -37,3 +42,6 @@ outputs/
 *.pfx
 .credentials
 credentials.json
+.secrets/
+secrets/
+*.bundle

@@ -107,7 +107,7 @@ def augment_patches_center_coordinates(
 
 
 class DINOv3ViTRopePositionEmbedding(nn.Module):
-    inv_freq: torch.Tensor
+    periods: torch.Tensor
     """
     DINOv3ViTRopePositionEmbedding
 
@@ -154,8 +154,8 @@ class DINOv3ViTRopePositionEmbedding(nn.Module):
         self.pos_embed_jitter = pos_embed_jitter
         self.pos_embed_rescale = pos_embed_rescale
 
-        inv_freq = 1 / self.base ** torch.arange(0, 1, 4 / self.head_dim, dtype=torch.float32)  # (head_dim / 4,)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        periods = self.base ** torch.arange(0, 1, 4 / self.head_dim, dtype=torch.float32)
+        self.register_buffer("periods", periods)
 
     def forward(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         _, _, height, width = pixel_values.shape
@@ -183,7 +183,7 @@ class DINOv3ViTRopePositionEmbedding(nn.Module):
                 )
 
             # (height * width, 2, head_dim / 4) -> (height * width, head_dim / 2) -> (height * width, head_dim)
-            angles = 2 * math.pi * patch_coords[:, :, None] * self.inv_freq[None, None, :]
+            angles = 2 * math.pi * patch_coords[:, :, None] / self.periods[None, None, :]
             angles = angles.flatten(1, 2)
             angles = angles.tile(2)
 

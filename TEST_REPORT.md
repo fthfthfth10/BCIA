@@ -1,6 +1,15 @@
 # 本地验收 — 2026-11-19
 
-## 结果
+## 第二阶段
+
+- 单测 **8/8 通过**。非零残差回归：固定 RGB 和有效掩码，单独修改被屏蔽的 DSM 值时所有注入残差逐元素不变；改变邻近有效 DSM 时，q=0 patch 的 RGB 权重和非零 RGB 残差逐元素不变，而邻近有效 patch 的残差确实变化。gH2R 输出在无效中心被屏蔽，uR=zR、路由的 DSM 通道为零；没有发现局部泄漏，未修改 BCIA 算子。后六层和 head 的全局注意力仍可传播其他区域的合法信息，不承诺最终 logits 的区域隔离。
+- 非零输出投影时，受控残差反向可达 DSM stem、RGB 投影、两个预测器、路由器、融合层和输出投影，梯度均有限且各组至少有一项非零。预训练零投影 smoke 中，DINO 实际为 eval、requires_grad=False 且无梯度，其他模块为 train、requires_grad=True；head 和输出投影有非零梯度，BCIA 上游与 DSM stem 首步梯度为零。
+- **预训练 GPU smoke PASS**：严格加载 416 个张量，以合成 batch 1 执行 FP32（无 autocast、TF32 关闭）分割前反向。初始恒等、CLS/Register 保持、覆盖率门控及 shape/dtype/device 检查均通过。loss **2.0023036003112793**，优化器更新 **0**。参数量见下方原表，未改变。
+- RTX 3070 Ti：前向前 allocated **1282.73 MiB**，前反向峰值 allocated **2387.11 MiB**、reserved **2508.00 MiB**。测量方法与第一阶段相同。
+- 原生公式对照通过：RoPE 2×2 / 32×32 逐元素相同，fused QKV/SDPA 逐层对照全部 24 层及最终归一化；最大最终 patch 误差 **2.59e-6**。权重来源、SHA-256 和具体映射见 [WEIGHT_AUDIT.md](WEIGHT_AUDIT.md)。
+- 未运行真实全量验证、正式训练或超参数搜索；无优化器更新。
+
+## 第一阶段结果（历史）
 
 ~~~text
 test_checkpoint_gate ................................... ok
@@ -33,7 +42,7 @@ segmentation loss=1.925273060798645; optimizer updates=0
 
 RTX 3070 Ti（8191.5 MiB，驱动 616.92，PyTorch CUDA 12.1）：前向前 allocated **1282.73 MiB**，前反向峰值 allocated **2387.11 MiB**、reserved **2508.00 MiB**。PyTorch allocator 统计，计入常驻模型，不是系统级显存；无优化器状态。
 
-## 只读 checkpoint 审计
+## 第一阶段只读 checkpoint 审计（历史）
 
 | 文件 | SHA-256 | 检查结果 |
 | --- | --- | --- |

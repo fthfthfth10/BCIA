@@ -21,7 +21,7 @@ def nonzero_gradient(module):
     return any(grad.count_nonzero().item() for grad in gradients)
 
 
-def run(device):
+def run(device, checkpoint=None):
     device = torch.device(device)
     cuda = device.type == "cuda"
     torch.manual_seed(16)
@@ -34,11 +34,12 @@ def run(device):
         device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.reset_peak_memory_stats(device)
 
-    model = BCIAPeft(random_init=True).to(device).train()
+    model = BCIAPeft(checkpoint=checkpoint, random_init=checkpoint is None).to(device).train()
     assert len(model.backbone.layer) == 24 and INSERT_AFTER == 17
     assert all(not module.training for module in model.backbone.modules())
     assert all(not param.requires_grad for param in model.backbone.parameters())
     for module in (model.dsm_encoder, model.bcia, model.decode_head):
+        assert module.training
         assert all(param.requires_grad for param in module.parameters())
     for param in model.parameters():
         assert param.dtype == torch.float32 and param.device == device
@@ -140,7 +141,8 @@ def run(device):
     counts = model.parameter_counts()
     counts["all"] = {key: sum(row[key] for row in counts.values())
                      for key in ("total", "trainable")}
-    report = dict(status="PASS", weights="random synthetic only", device=str(device), batch=1,
+    weight_mode = "strict Meta-converted backbone, untrained head" if checkpoint else "random synthetic only"
+    report = dict(status="PASS", weights=weight_mode, device=str(device), batch=1,
                   dtype="FP32 (TF32 disabled; no autocast)", zero_residual=True,
                   exact_backbone_bypass=True, prefix_unchanged=True, strict_dsm_gate=True,
                   predictors_and_router_nonzero_inputs=True, segmentation_loss=loss.item(),
@@ -161,5 +163,6 @@ def run(device):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="One synthetic forward/backward; no optimizer")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--checkpoint", help="Strictly compatible pretrained BCIA backbone")
     args = parser.parse_args()
-    print(json.dumps(run(args.device), indent=2))
+    print(json.dumps(run(args.device, args.checkpoint), indent=2))

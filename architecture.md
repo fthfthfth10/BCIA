@@ -6,9 +6,9 @@
 | --- | --- |
 | 冻结 DINOv3 接口，固定 Block 插入点，Segmenter Head | bcia_peft/model.py、bcia_peft/_dinov3.py |
 | DSM 卷积、BCIA、独立预测辅助损失 | bcia_peft/adapter.py |
-| 预训练 checkpoint 只读审计和严格加载 | bcia_peft/checkpoints.py |
+| 预训练 checkpoint 只读审计、独立转换和严格加载 | bcia_peft/checkpoints.py、bcia_peft/convert_checkpoint.py |
 | 切片预处理、单窗口验证与指标 | bcia_peft/data.py、bcia_peft/validation.py、configs/potsdam.json |
-| 单元测试及 batch1 前反向 | tests/test_components.py、tests/smoke.py |
+| 单元测试、原生公式对照及 batch1 前反向 | tests/test_components.py、tests/test_stage2.py、tests/native_parity.py、tests/smoke.py |
 
 ## 前向张量（batch 1）
 
@@ -31,5 +31,7 @@
 无效或非有限 DSM 像素入 stem 前替换为 0。有效 patch 使用原预测残差；q=0 时清零 zH、uH、wH，并屏蔽 gH2R 的局部输出，避免 3×3 邻域与 bias 在该位置注入 DSM，保留 uR=zR 的 RGB 路由。部分有效 patch 的 q 作为路由输入，而不是强制归一化或额外缩放两个权重。严格零贡献是 **BCIA 注入点的局部约束**，不禁止后续全局自注意力传播来自其他有效 patch 的信息。
 
 DINO 始终 eval，所有参数冻结；后六层仍参与 autograd，不能断开 BCIA 到分割头的梯度。仅 BCIA 最终投影的 weight 和 bias 特意清零；第一步分割损失的梯度可到达该投影，但其上游梯度为零。DSM stem、BCIA、Segmenter 都可训练。prediction_losses 单独提供以 q 加权的双向 MSE，目标特征 detach；不纳入默认分割前向及验收反向。
+
+预训练模式严格加载全部参数与 RoPE 周期缓冲区；后者不是可训练参数。RGB 与 DSM 的新息定义、路由结构、插入位置和有效区信息流不因权重转换改变。
 
 验证保留 impervious_surface / building / low_vegetation / tree / car / clutter，原标签 0→255，1…6→0…5。使用 MMSeg 上采样和 IoU 交并计数，按旧验证口径输出百分数：前五类 mIoU5、六类 mIoU6、OA；子集缺类且交并比未定义时输出 null。

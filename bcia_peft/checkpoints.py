@@ -59,6 +59,10 @@ def inspect_state(state, expected):
         ("norm.weight", "norm1.weight", "norm2.weight"))]
     result["zero_layernorm_scales"] = [key for key in norm_scales
                                         if not torch.count_nonzero(state[key]).item()]
+    result["invalid_rope_periods"] = [
+        key for key in ("rope_embed.periods", "rope_embeddings.periods")
+        if key in state and not (state[key] > 0).all().item()
+    ]
     result["compatible"] = not any(value for value in result.values()
                                    if isinstance(value, list))
     result["checked_layernorm_scales"] = len(norm_scales)
@@ -79,12 +83,16 @@ def load_backbone_checkpoint(backbone, path):
     backbone.load_state_dict(state, strict=True)
 
 
-def audit_file(path, expected):
+def file_sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
             digest.update(chunk)
-    return dict(sha256=digest.hexdigest(), **inspect_state(_read(path), expected))
+    return digest.hexdigest()
+
+
+def audit_file(path, expected):
+    return dict(sha256=file_sha256(path), **inspect_state(_read(path), expected))
 
 
 def main():
