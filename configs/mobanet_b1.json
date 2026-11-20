@@ -1,0 +1,29 @@
+{
+  "seed": 42,
+  "batch_size": 1,
+  "workers": 0,
+  "steps": 40000,
+  "validate_every": 2000,
+  "save_every": 2000,
+  "lr": 0.0001,
+  "weight_decay": 0.05,
+  "warmup_steps": 1500,
+  "warmup_start_ratio": 0.1,
+  "power": 1,
+  "min_lr_ratio": 0,
+  "upstream": {
+    "encoder": "dinov2_vitb14",
+    "use_cpia": true,
+    "use_dgfm": true,
+    "dinov2_use_extra_patch_embed": true,
+    "peft_ratio": 0.25,
+    "mcrc": true,
+    "mcrc_ratio": 0.25,
+    "mcrc_local_blocks": 1,
+    "mcrc_block_scale_min": 0.1,
+    "mcrc_block_scale_max": 0.3,
+    "mcrc_block_aspect_min": 0.5,
+    "mcrc_block_aspect_max": 2.0,
+    "mcrc_aux_weight": 0.01
+  }
+}

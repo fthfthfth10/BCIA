@@ -1,8 +1,18 @@
-# B1 MoBaNet v3 预检
+# B1 MoBaNet v3
 
-结论：正式训练未启动。官方 ViT-B/14 经作者的补齐规则处理后，在 RTX 3070 Ti 上仍无法完成 FP32 batch 1 的训练前向。失败点为 UPerNet 的 PPM 全局池化分支 BatchNorm。正式训练结果和验证 CSV 尚无数据。
+## Batch 1 续接协议与验收
 
-## 来源与协议
+基准提交 5966b1d3a6db3f7cdfc641de382db6b39603f01b。正式入口使用独立适配层、已核验的本地官方 MoBaNet 树和原 Meta 权重。仅 PPM 1×1 池化分支的 BatchNorm 固定使用 eval 统计，保留 affine 梯度，其他 BN 正常训练。MCRC 每样本独立 Bernoulli(0.25)。命中后等概率选择一个模态，调用原官方局部矩形遮挡函数（1 块、面积比例 0.1–0.3、长宽比 0.5–2）。推理无 MCRC。主分支用有效像素平均 CE，两个辅助头只对主分支误分的非忽略像素各算 CE，总权重 0.01。空监督集为零。按原始 512 窗口计算损失及验证，RGB/DSM 右下补零到 518，输出裁回 512，DSM 的无效或非有限像素在输入处置零。
+
+冻结配置为 configs/mobanet_b1.json，Potsdam v3 的 3,456 / 2,016 个窗口、seed 42、batch 1、workers 0、FP32、AdamW lr=1e-4、wd=0.05、1,500 步 warmup 且起始比例 0.1、40,000 步多项式衰减 power=1、每 2,000 步验证与保存、mIoU5 选 Best、无 TTA。保留官方核心网络和专用辅助损失。
+
+Python 3.8 无法导入官方 PEP 604 类型注解。续接环境为 Windows、Python 3.10.22、PyTorch 2.1.0+cu118、torchvision 0.16.0+cu118、MMSeg 1.2.2、MMCV 2.1.0、MMEngine 0.10.7。本地额外依赖为 einops 0.8.1、timm 0.9.16、safetensors 0.5.3。严格 CUDA 算子确定性模式拒绝官方 PPM adaptive pooling 反向。因此 B1 独立设定 cuDNN deterministic=True、关闭 benchmark 及 TF32，并将全局非确定算子检查设为 warn_only，保留官方算子。CUDA adaptive pooling 和 memory-efficient attention 反向存在非确定性警告，固定 seed 不保证训练逐位重现。这是 B1 与 BCIA 的运行时差异。
+
+真实首批次 4_10_0_3584_512_4096 预检通过，AdamW 实际更新一次。主 CE 1.82354248，RGB/DSM 辅助 CE 1.80981970 / 1.85582483，总损失 1.86019897。该步未选中 MCRC。冻结主干无梯度，1×1 BN 的 running mean/var 不变且 affine 两参数梯度非零。峰值 allocated 1,805,293,056 字节，reserved 2,080,374,784 字节，含创建 AdamW 状态。Last 加载成功，恢复第 1 步的模型、AdamW、RNG 和调度器。单窗验证输出六类。33 项测试通过，涵盖全局 BN 训练反向、保留其他 BN 模式、MCRC 概率和 seed 回放、忽略标签、补齐与裁切。
+
+运行方式为 python -m mobanet_b1，设置 BCIA_DATA_ROOT、BCIA_MOBANET_SOURCE、BCIA_MOBANET_WEIGHTS，传入 --work-dir；预检附 --preflight，正式运行附 --commit 和已推送的训练提交 SHA。官方源码、权重依赖和输出均保留本地。
+
+## 原始预检与来源
 
 - BCIA 起始提交 df30bfeab551c59d6e952a08409650f631b80041。本机 MoBaNet 快照无 .git，无法归属到确定的提交。对比发现其 Net.py 增加了 DINOv3 支持，DINOv2 构建文件也有本地差异。本机与官方 hubconf.py、patch_embed.py 的 blob 相同。预检使用原样官方树 77b59b9ff2763ddc8d07065bb7547f23d292d391，在本地忽略目录运行，未迁入第三方源码。该树未找到 LICENSE、COPYING 或 NOTICE，论文的 arXiv 条款也没有为仓库源码指定许可证。[官方提交](https://github.com/sauryeo/MoBaNet/commit/77b59b9ff2763ddc8d07065bb7547f23d292d391)
 - 无 register 的蒸馏 DINOv2 ViT-B/14 backbone 权重来自 Meta，SHA-256 为 0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73。175 个张量的键和值逐项相同，严格加载报告零缺失、额外键或形状丢弃。Meta 为常规 DINOv2 源码与权重注明 Apache-2.0。[预训练来源](https://github.com/facebookresearch/dinov2#pretrained-models)
